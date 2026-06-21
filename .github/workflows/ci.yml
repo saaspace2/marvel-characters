@@ -1,6 +1,6 @@
 name: CI
 
-on:
+pn:
   pull_request:
     branches:
       - main
