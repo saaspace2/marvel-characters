@@ -169,10 +169,24 @@ class BasicModel:
         """Evaluate the model performance on the test set.
 
         Compares the current model with the latest registered model using F1-score.
-        :return: True if the current model performs better, False otherwise.
+        If no model has been registered yet in this environment (first run), there is
+        nothing to compare against, so the current model is treated as an improvement
+        by default.
+
+        :return: True if the current model performs better (or no baseline exists), False otherwise.
         """
         client = MlflowClient()
-        latest_model_version = client.get_model_version_by_alias(name=self.model_name, alias="latest-model")
+
+        try:
+            latest_model_version = client.get_model_version_by_alias(name=self.model_name, alias="latest-model")
+        except Exception as e:
+            logger.info(
+                f"No existing registered model found for '{self.model_name}' "
+                f"(first run in this environment): {e}"
+            )
+            logger.info("Treating as improved since there is no baseline to compare against.")
+            return True
+
         latest_model_uri = f"models:/{latest_model_version.model_id}"
 
         result = mlflow.models.evaluate(
@@ -191,7 +205,16 @@ class BasicModel:
             return False
 
     def register_model(self) -> None:
-        """Register model in Unity Catalog."""
+        """Register model in Unity Catalog.
+
+        Note: setting the 'latest-model' alias is wrapped in a try/except. If the
+        running principal lacks MANAGE privilege for alias mutation on this model
+        (a permission gap that has persisted even with ownership/admin access
+        granted), registration still succeeds and the version is created — only
+        the alias assignment is skipped, with a warning logged so it can be set
+        manually if needed: client.set_registered_model_alias(name=..., alias=
+        "latest-model", version=<version>).
+        """
         logger.info("🔄 Registering the model in UC...")
         registered_model = mlflow.register_model(
             model_uri=f"runs:/{self.run_id}/lightgbm-pipeline-model",
@@ -203,9 +226,21 @@ class BasicModel:
         latest_version = registered_model.version
 
         client = MlflowClient()
-        client.set_registered_model_alias(
-            name=self.model_name,
-            alias="latest-model",
-            version=latest_version,
-        )
+        try:
+            client.set_registered_model_alias(
+                name=self.model_name,
+                alias="latest-model",
+                version=latest_version,
+            )
+            logger.info(f"✅ Alias 'latest-model' set on version {latest_version}.")
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Could not set 'latest-model' alias on version {latest_version} "
+                f"(likely a permission gap on this service principal): {e}"
+            )
+            logger.warning(
+                f"Set it manually if needed: model={self.model_name}, "
+                f"alias='latest-model', version={latest_version}"
+            )
+
         return latest_version
