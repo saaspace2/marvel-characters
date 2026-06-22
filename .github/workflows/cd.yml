@@ -49,7 +49,7 @@ jobs:
       - name: Wait for ACC serving endpoint to finish updating
         env:
           DATABRICKS_BUNDLE_ENV: acc
-          ENDPOINT_NAME: ${{ vars.ACC_SERVING_ENDPOINT_NAME }}
+          ENDPOINT_NAME: marvel-character-model-serving
         run: |
           echo "Polling serving endpoint '$ENDPOINT_NAME' until it is fully ready..."
           max_attempts=60
