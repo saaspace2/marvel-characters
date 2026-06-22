@@ -39,16 +39,43 @@ jobs:
           databricks bundle deploy \
             --var="git_sha=${{ github.sha }}" \
             --var="branch=${{ github.ref_name }}"
-      - name: Run Workflow on Databricks (register model only, no deploy)
+      - name: Run Workflow on Databricks
         env:
           DATABRICKS_BUNDLE_ENV: acc
         run: |
           databricks bundle run deployment \
             --var="git_sha=${{ github.sha }}" \
-            --var="branch=${{ github.ref_name }}" \
-            --task=train_model,register_model
-            # ^ REPLACE with your actual task_key values, in order,
-            #   stopping before (and excluding) the deploy_model task.
+            --var="branch=${{ github.ref_name }}"
+      - name: Wait for ACC serving endpoint to finish updating
+        env:
+          DATABRICKS_BUNDLE_ENV: acc
+          ENDPOINT_NAME: ${{ vars.ACC_SERVING_ENDPOINT_NAME }}
+        run: |
+          echo "Polling serving endpoint '$ENDPOINT_NAME' until it is fully ready..."
+          max_attempts=60
+          sleep_seconds=30
+          attempt=1
+
+          while [ $attempt -le $max_attempts ]; do
+            status=$(databricks serving-endpoints get "$ENDPOINT_NAME" -o json | python3 -c "import sys, json; print(json.load(sys.stdin)['state']['config_update'])")
+            echo "Attempt $attempt/$max_attempts -> config_update: $status"
+
+            if [ "$status" = "NOT_UPDATING" ]; then
+              echo "Endpoint is ready, serving the new version."
+              exit 0
+            fi
+
+            if [ "$status" = "UPDATE_FAILED" ]; then
+              echo "Endpoint update failed. Aborting before promoting to prod."
+              exit 1
+            fi
+
+            attempt=$((attempt + 1))
+            sleep $sleep_seconds
+          done
+
+          echo "Timed out after $((max_attempts * sleep_seconds / 60)) minutes waiting for endpoint to become ready."
+          exit 1
 
   deploy-prd:
     runs-on: ubuntu-latest
@@ -85,16 +112,13 @@ jobs:
           databricks bundle deploy \
             --var="git_sha=${{ github.sha }}" \
             --var="branch=${{ github.ref_name }}"
-      - name: Run Workflow on Databricks (register model only, no deploy)
+      - name: Run Workflow on Databricks
         env:
           DATABRICKS_BUNDLE_ENV: prd
         run: |
           databricks bundle run deployment \
             --var="git_sha=${{ github.sha }}" \
-            --var="branch=${{ github.ref_name }}" \
-            --task=train_model,register_model
-            # ^ REPLACE with your actual task_key values, in order,
-            #   stopping before (and excluding) the deploy_model task.
+            --var="branch=${{ github.ref_name }}"
       - name: Tag version (prd only)
         run: |
           echo "VERSION=$(cat version.txt)"
