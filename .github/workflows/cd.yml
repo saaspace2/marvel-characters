@@ -5,12 +5,9 @@ on:
     branches:
         - 'main'
 jobs:
-  deploy:
+  deploy-acc:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        environment: [acc, prd]
-    environment: ${{ matrix.environment }}
+    environment: acc
     permissions:
       contents: write
     env:
@@ -41,7 +38,7 @@ jobs:
 
       - name: Deploy Bundle to Databricks
         env:
-          DATABRICKS_BUNDLE_ENV: ${{ matrix.environment }}
+          DATABRICKS_BUNDLE_ENV: acc
         run: |
           databricks bundle deploy \
             --var="git_sha=${{ github.sha }}" \
@@ -49,14 +46,61 @@ jobs:
 
       - name: Run Workflow on Databricks
         env:
-          DATABRICKS_BUNDLE_ENV: ${{ matrix.environment }}
+          DATABRICKS_BUNDLE_ENV: acc
+        run: |
+          databricks bundle run deployment \
+            --var="git_sha=${{ github.sha }}" \
+            --var="branch=${{ github.ref_name }}"
+
+  deploy-prd:
+    runs-on: ubuntu-latest
+    needs: deploy-acc
+    environment: prd
+    permissions:
+      contents: write
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 #v4.2.2
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@49580195afe1ccb06d195764a1d0ae9fabfe2edd #v0.246.0
+        with:
+          version: 0.296.1
+
+      - name: Configure Databricks CLI
+        run: |
+          mkdir -p ~/.databricks
+          cat > ~/.databrickscfg << EOF
+          [marvelous]
+          host = ${{ vars.DATABRICKS_HOST }}
+          client_id = ${{ secrets.DATABRICKS_CLIENT_ID }}
+          client_secret = ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          EOF
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 #v5.4.1
+
+      - name: Deploy Bundle to Databricks
+        env:
+          DATABRICKS_BUNDLE_ENV: prd
+        run: |
+          databricks bundle deploy \
+            --var="git_sha=${{ github.sha }}" \
+            --var="branch=${{ github.ref_name }}"
+
+      - name: Run Workflow on Databricks
+        env:
+          DATABRICKS_BUNDLE_ENV: prd
         run: |
           databricks bundle run deployment \
             --var="git_sha=${{ github.sha }}" \
             --var="branch=${{ github.ref_name }}"
 
       - name: Tag version (prd only)
-        if: ${{ matrix.environment == 'prd' }}
         run: |
           echo "VERSION=$(cat version.txt)"
           git tag $VERSION
