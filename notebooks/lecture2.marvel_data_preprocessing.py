@@ -7,7 +7,7 @@
 # from pathlib import Path
 # import sys
 # sys.path.append(str(Path.cwd().parent / 'src'))
-
+%pip install marvel_characters-0.1.1-py3-none-any.whl
 # COMMAND ----------
 import pandas as pd
 import yaml
