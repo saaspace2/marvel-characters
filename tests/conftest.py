@@ -1,42 +1,22 @@
-"""Common test fixtures for the marvel-characters project."""
+# tests/conftest.py
+import pytest, os, requests
 
-import sys
-from pathlib import Path
-from unittest.mock import MagicMock
+SAMPLE_RECORD = {
+    'Height': 1.75, 'Weight': 70.0, 'Universe': 'Earth-616',
+    'Identity': 'Public', 'Gender': 'Male', 'Marital_Status': 'Single',
+    'Teams': 'Avengers', 'Origin': 'Human', 'Magic': 0, 'Mutant': 0,
+}
 
-import pytest
-from pyspark.sql import SparkSession
+ENDPOINT_URL = os.environ.get('ENDPOINT_URL', '')
+DBR_TOKEN    = os.environ.get('DBR_TOKEN', '')
 
-# Add the src directory to the Python path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
-# Import project modules after path setup
-from marvel_characters.config import ProjectConfig  # noqa: E402
-
-
-@pytest.fixture(scope="session")
-def spark_session() -> SparkSession | MagicMock:
-    """Create a SparkSession for testing."""
-    try:
-        return (
-            SparkSession.builder.master("local[1]")
-            .appName("marvel-characters-test")
-            .config("spark.sql.shuffle.partitions", "1")
-            .config("spark.default.parallelism", "1")
-            .getOrCreate()
-        )
-    except Exception:
-        # Return a mock if we can't create a real SparkSession
-        return MagicMock()
-
+def call_endpoint(record):
+    response = requests.post(
+        ENDPOINT_URL,
+        headers={'Authorization': f'Bearer {DBR_TOKEN}'},
+        json={'dataframe_records': record}, timeout=30
+    )
+    return response.status_code, response.text
 
 @pytest.fixture
-def mock_project_config() -> MagicMock:
-    """Create a mock ProjectConfig for testing."""
-    config = MagicMock(spec=ProjectConfig)
-    config.cat_features = ["Universe", "Origin", "Identity", "Gender", "Marital_Status"]
-    config.num_features = ["Height", "Weight", "Teams", "Magic", "Mutant"]
-    config.target = "Alive"
-    config.catalog_name = "test_catalog"
-    config.schema_name = "test_schema"
-    return config
+def sample_record(): return SAMPLE_RECORD.copy()
