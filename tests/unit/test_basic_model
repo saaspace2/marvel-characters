@@ -1,0 +1,105 @@
+"""Unit tests for marvel_characters.models.basic_model.
+
+These tests avoid Spark, Delta, and MLflow entirely — they exercise only the
+in-memory pieces: attribute wiring from config/tags, and the sklearn pipeline
+(including the nested CatToIntTransformer) built by prepare_features().
+load_data, log_model, model_improved, and register_model are NOT covered here;
+they need a real or heavily mocked Spark/MLflow stack and belong in
+integration tests instead.
+"""
+
+from types import SimpleNamespace
+
+import pandas as pd
+import pytest
+
+from marvel_characters.config import Tags
+from marvel_characters.models.basic_model import BasicModel
+
+
+@pytest.fixture
+def fake_config():
+    return SimpleNamespace(
+        num_features=["Height", "Weight"],
+        cat_features=["Gender"],
+        target="Alive",
+        parameters={"n_estimators": 5, "max_depth": 2, "verbose": -1},
+        catalog_name="test_catalog",
+        schema_name="test_schema",
+        experiment_name_basic="/exp/test-basic",
+    )
+
+
+@pytest.fixture
+def fake_tags():
+    return Tags(git_sha="abc123", branch="main")
+
+
+def test_init_sets_attributes_from_config(fake_config, fake_tags):
+    model = BasicModel(fake_config, fake_tags, spark=None)
+
+    assert model.num_features == fake_config.num_features
+    assert model.cat_features == fake_config.cat_features
+    assert model.target == "Alive"
+    assert model.parameters == fake_config.parameters
+    assert model.model_name == "test_catalog.test_schema.marvel_character_model_basic"
+
+
+def test_init_converts_tags_to_dict(fake_config, fake_tags):
+    model = BasicModel(fake_config, fake_tags, spark=None)
+    assert model.tags == {"git_sha": "abc123", "branch": "main"}
+
+
+def test_prepare_features_builds_pipeline_with_expected_steps(fake_config, fake_tags):
+    model = BasicModel(fake_config, fake_tags, spark=None)
+    model.prepare_features()
+
+    assert list(model.pipeline.named_steps.keys()) == ["preprocessor", "regressor"]
+
+
+def test_pipeline_predicts_without_error_on_unseen_category(fake_config, fake_tags):
+    """Docstring claims unknown categories at transform time get encoded as -1.
+
+    This test proves that claim: a category never seen during fit should not
+    crash prediction, which is the actual risk this transformer protects against.
+    """
+    model = BasicModel(fake_config, fake_tags, spark=None)
+    model.prepare_features()
+
+    X_train = pd.DataFrame(
+        {
+            "Height": [1.7, 1.8, 1.6, 1.9],
+            "Weight": [70.0, 80.0, 60.0, 90.0],
+            "Gender": ["Male", "Female", "Male", "Female"],
+        }
+    )
+    y_train = pd.Series([1, 0, 1, 0])
+
+    model.pipeline.fit(X_train, y_train)
+
+    X_test_unseen_category = pd.DataFrame(
+        {"Height": [1.75], "Weight": [75.0], "Gender": ["NonBinary"]}  # never seen during fit
+    )
+
+    predictions = model.pipeline.predict(X_test_unseen_category)
+
+    assert len(predictions) == 1
+    assert predictions[0] in (0, 1)
+
+
+def test_pipeline_predicts_correctly_on_known_categories(fake_config, fake_tags):
+    model = BasicModel(fake_config, fake_tags, spark=None)
+    model.prepare_features()
+
+    X_train = pd.DataFrame(
+        {
+            "Height": [1.7, 1.8, 1.6, 1.9],
+            "Weight": [70.0, 80.0, 60.0, 90.0],
+            "Gender": ["Male", "Female", "Male", "Female"],
+        }
+    )
+    y_train = pd.Series([1, 0, 1, 0])
+    model.pipeline.fit(X_train, y_train)
+
+    predictions = model.pipeline.predict(X_train)
+    assert len(predictions) == len(X_train)
