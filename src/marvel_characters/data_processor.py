@@ -66,6 +66,12 @@ class DataProcessor:
         # Mutant
         self.df["Mutant"] = self.df["Origin"].str.lower().apply(lambda x: int("mutate" in x or "mutant" in x))
 
+        # Height / Weight: most characters lack documented physical stats
+        # (~94% null in this dataset). Median-impute rather than drop, since
+        # dropping would discard the vast majority of rows.
+        for col in ["Height", "Weight"]:
+            self.df[col] = self.df[col].fillna(self.df[col].median())
+
         # Normalize origin
         def normalize_origin(x: str) -> str:
             x_lower = str(x).lower()
