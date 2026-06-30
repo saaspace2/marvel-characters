@@ -77,6 +77,63 @@ jobs:
           echo "Timed out after $((max_attempts * sleep_seconds / 60)) minutes waiting for endpoint to become ready."
           exit 1
 
+      # ====================================================================
+      # POST-DEPLOY TESTS AGAINST THE LIVE ACC ENDPOINT
+      # The endpoint is confirmed ready above, so now we test it for real.
+      # Order matters: smoke is the GATE. If smoke fails, everything stops
+      # and we never promote a broken model toward production.
+      # ====================================================================
+      - name: Install test dependencies
+        run: |
+          uv sync --extra test
+
+      - name: Set endpoint environment variables (ACC)
+        run: |
+          echo "ENDPOINT_URL=${{ vars.DATABRICKS_HOST }}/serving-endpoints/marvel-character-model-serving/invocations" >> $GITHUB_ENV
+          echo "DBR_TOKEN=${{ secrets.DATABRICKS_TOKEN }}" >> $GITHUB_ENV
+
+      - name: Smoke tests (GATE - is the live model even alive?)
+        run: |
+          uv run pytest tests/smoke/ -v --no-cov
+
+      - name: Serving endpoint tests (is it correct, fast, robust?)
+        run: |
+          uv run pytest tests/ServingEndpoint/ -v --no-cov
+
+      - name: Contract tests (is the API still keeping its promise?)
+        run: |
+          uv run pytest tests/contract/ -v --no-cov
+
+      - name: Snapshot tests (did the response shape change?)
+        # Allowed to fail the first time before a snapshot exists; afterwards
+        # a real shape change should block promotion. Commit api_snapshot.json
+        # to the repo once captured so this becomes a hard gate.
+        run: |
+          uv run pytest tests/snapshot/ -v --no-cov
+
+      - name: Fuzz tests (do crazy inputs crash it? They must not.)
+        run: |
+          uv run pytest tests/fuzz/ -v --no-cov
+
+      - name: Property-based tests (do the always-true rules hold?)
+        run: |
+          uv run pytest tests/property_based/ -v --no-cov
+
+      - name: Performance tests (fast enough under load?)
+        run: |
+          uv run pytest tests/performance/ -v -m "not slow" --no-cov
+
+      - name: Monitoring & drift tests (data/prediction drift check)
+        run: |
+          uv run pytest tests/monitoring_and_drift/ -v --no-cov
+
+      - name: Regression tests (did we break a previously-correct answer?)
+        # Requires golden_outputs.json committed to the repo. If absent, this
+        # skips cleanly. Capture it once with --update-golden against an
+        # approved model and commit it to turn this into a hard gate.
+        run: |
+          uv run pytest tests/regression/ -v --no-cov
+
   deploy-prd:
     runs-on: ubuntu-latest
     needs: deploy-acc
@@ -119,6 +176,49 @@ jobs:
           databricks bundle run deployment \
             --var="git_sha=${{ github.sha }}" \
             --var="branch=${{ github.ref_name }}"
+
+      # ====================================================================
+      # POST-DEPLOY SANITY TESTS AGAINST THE LIVE PROD ENDPOINT
+      # Lighter than ACC: confirm prod is alive and answers correctly. We do
+      # NOT run heavy/destructive suites (fuzz, chaos, load) against prod.
+      # ====================================================================
+      - name: Wait for PRD serving endpoint to finish updating
+        env:
+          ENDPOINT_NAME: marvel-character-model-serving
+        run: |
+          echo "Polling PRD serving endpoint '$ENDPOINT_NAME' until ready..."
+          max_attempts=60
+          sleep_seconds=30
+          attempt=1
+          while [ $attempt -le $max_attempts ]; do
+            status=$(databricks serving-endpoints get "$ENDPOINT_NAME" -o json | python3 -c "import sys, json; print(json.load(sys.stdin)['state']['config_update'])")
+            echo "Attempt $attempt/$max_attempts -> config_update: $status"
+            if [ "$status" = "NOT_UPDATING" ]; then echo "PRD endpoint ready."; break; fi
+            if [ "$status" = "UPDATE_FAILED" ]; then echo "PRD update failed."; exit 1; fi
+            attempt=$((attempt + 1)); sleep $sleep_seconds
+          done
+
+      - name: Install test dependencies
+        run: |
+          uv sync --extra test
+
+      - name: Set endpoint environment variables (PRD)
+        run: |
+          echo "ENDPOINT_URL=${{ vars.DATABRICKS_HOST }}/serving-endpoints/marvel-character-model-serving/invocations" >> $GITHUB_ENV
+          echo "DBR_TOKEN=${{ secrets.DATABRICKS_TOKEN }}" >> $GITHUB_ENV
+
+      - name: Smoke tests against PROD (GATE)
+        run: |
+          uv run pytest tests/smoke/ -v --no-cov
+
+      - name: Serving correctness against PROD
+        run: |
+          uv run pytest tests/ServingEndpoint/ -v --no-cov
+
+      - name: Regression check against PROD
+        run: |
+          uv run pytest tests/regression/ -v --no-cov
+
       - name: Tag version (prd only)
         run: |
           echo "VERSION=$(cat version.txt)"
