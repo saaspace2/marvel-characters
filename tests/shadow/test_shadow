@@ -1,0 +1,120 @@
+"""Shadow Tests for the Marvel Characters serving endpoint.
+
+WHAT IS SHADOW TESTING?
+-----------------------
+Shadow testing runs a NEW model in parallel with the PRODUCTION model, without
+showing users the new model's results. You compare the two silently to build
+confidence before switching.
+
+    Analogy: a new surgeon shadows an experienced one. Both decide treatment,
+    but only the experienced surgeon's decision is acted on. The hospital
+    quietly checks whether the new surgeon would have agreed. After enough
+    matching cases, the new surgeon is trusted to operate alone.
+
+WHAT WE VERIFY
+--------------
+1. The shadow (new) model is alive and never crashes.
+2. The shadow model agrees with production on >= 90% of inputs.
+3. The shadow model is not dramatically slower than production.
+4. The shadow model produces valid, in-range predictions.
+
+CONFIG
+------
+Set ENDPOINT_URL (production) and ENDPOINT_URL_SHADOW (new model).
+If ENDPOINT_URL_SHADOW is unset, this whole suite is skipped.
+
+RUN
+---
+    pytest tests/advanced/test_shadow.py -v
+"""
+
+import pytest
+
+from conftest import extract_prediction, normalise_prediction
+
+
+DISAGREEMENT_THRESHOLD = 0.10   # max 10% disagreement allowed
+LATENCY_TOLERANCE      = 1.50   # shadow may be at most 50% slower than prod
+
+
+class TestShadowLiveness:
+    """The shadow model must be alive and not crash."""
+
+    def test_shadow_endpoint_alive(self, shadow_url, call_named_endpoint, valid_record):
+        """The shadow endpoint must respond 200 to a valid record."""
+        status, _, _ = call_named_endpoint(shadow_url, [valid_record])
+        assert status == 200, f"Shadow endpoint returned HTTP {status}"
+
+    def test_shadow_never_crashes_on_bank(self, shadow_url, call_named_endpoint, record_bank):
+        """The shadow model must not return 500 on any normal record."""
+        crashes = []
+        for case_id, record in record_bank.items():
+            status, _, _ = call_named_endpoint(shadow_url, [record])
+            if status == 500:
+                crashes.append(case_id)
+        assert not crashes, f"Shadow model crashed on: {crashes}"
+
+
+class TestShadowAgreement:
+    """The shadow model must agree with production often enough to be trusted."""
+
+    def test_disagreement_rate_acceptable(
+        self, call_endpoint, shadow_url, call_named_endpoint, record_bank
+    ):
+        """Compare prod vs shadow on every bank record; disagreement must be
+        under the threshold.
+
+        High disagreement means the new model behaves very differently and is
+        NOT ready to be promoted, even if each individual prediction is 'valid'.
+        """
+        disagreements = []
+        total = 0
+        for case_id, record in record_bank.items():
+            _, prod_body, _   = call_endpoint([record])
+            _, shadow_body, _ = call_named_endpoint(shadow_url, [record])
+            prod   = normalise_prediction(extract_prediction(prod_body))
+            shadow = normalise_prediction(extract_prediction(shadow_body))
+            total += 1
+            if prod != shadow:
+                disagreements.append(f"{case_id}: prod={prod} shadow={shadow}")
+
+        rate = len(disagreements) / total if total else 0
+        print(f"\n  disagreement rate = {rate:.1%} ({len(disagreements)}/{total})")
+
+        assert rate < DISAGREEMENT_THRESHOLD, (
+            f"Shadow model disagrees with production {rate:.1%} of the time "
+            f"(max {DISAGREEMENT_THRESHOLD:.0%}). Not ready to promote.\n"
+            + "\n".join(disagreements)
+        )
+
+
+class TestShadowPerformance:
+    """The shadow model must be reasonably fast and produce valid output."""
+
+    def test_shadow_latency_comparable(
+        self, call_endpoint, shadow_url, call_named_endpoint, valid_record
+    ):
+        """Shadow latency must be within tolerance of production latency."""
+        # Average a few calls to reduce noise
+        prod_times, shadow_times = [], []
+        for _ in range(5):
+            _, _, p = call_endpoint([valid_record]);                   prod_times.append(p)
+            _, _, s = call_named_endpoint(shadow_url, [valid_record]);  shadow_times.append(s)
+        prod_avg   = sum(prod_times) / len(prod_times)
+        shadow_avg = sum(shadow_times) / len(shadow_times)
+
+        print(f"\n  prod_avg={prod_avg:.0f}ms  shadow_avg={shadow_avg:.0f}ms")
+        assert shadow_avg <= prod_avg * LATENCY_TOLERANCE, (
+            f"Shadow model too slow: {shadow_avg:.0f}ms vs prod {prod_avg:.0f}ms "
+            f"(max allowed {prod_avg * LATENCY_TOLERANCE:.0f}ms)."
+        )
+
+    def test_shadow_predictions_valid(self, shadow_url, call_named_endpoint, record_bank):
+        """Every shadow prediction must be a valid in-range class."""
+        invalid = []
+        for case_id, record in record_bank.items():
+            _, body, _ = call_named_endpoint(shadow_url, [record])
+            pred = normalise_prediction(extract_prediction(body))
+            if pred not in (0, 1):
+                invalid.append(f"{case_id}: {pred!r}")
+        assert not invalid, f"Shadow produced invalid predictions: {invalid}"
