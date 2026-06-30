@@ -1,10 +1,8 @@
 name: CI
-
 on:
   pull_request:
     branches:
       - main
-
 jobs:
   pytest_and_checks:
     runs-on: ubuntu-latest
@@ -14,15 +12,12 @@ jobs:
           # Fetch all history for all branches and tags
           fetch-depth: 0
           ref: ${{ github.head_ref }}
-
       - name: Git tag from version.txt
         run: |
           echo "VERSION=$(cat version.txt)"
           git tag $VERSION
-
       - name: Install uv
         uses: astral-sh/setup-uv@0c5e2b8115b80b4c7c5ddf6ffdd634974642d182 #v5.4.1
-
       - name: Install the dependencies
         run: |
           uv sync --extra test
@@ -31,6 +26,47 @@ jobs:
         run: |
           uv run pre-commit run --all-files
 
-      - name: run pytest
+      # ------------------------------------------------------------------
+      # OFFLINE tests only -- these need NO live endpoint and NO Databricks
+      # cluster, so they are safe and fast to run on every pull request.
+      # The endpoint tests (smoke/serving/fuzz/etc.) run later in CD, once a
+      # real endpoint has actually been deployed.
+      # ------------------------------------------------------------------
+
+      - name: Unit tests (smallest pieces of code, in isolation)
         run: |
-          uv run pytest -m "not ci_exclude"
+          uv run pytest tests/unit/ -v -m "not ci_exclude" --no-cov
+
+      - name: Data quality tests (only if they do not need a live cluster)
+        # These read real Delta tables; keep them here only if your CI has
+        # Databricks creds. If they need a cluster, move them to CD instead.
+        if: ${{ env.RUN_DATA_TESTS == 'true' }}
+        env:
+          RUN_DATA_TESTS: ${{ vars.RUN_DATA_TESTS }}
+        run: |
+          uv run pytest tests/data/ -v --no-cov
+
+      - name: Training tests (reproducibility + pipeline construction)
+        run: |
+          uv run pytest tests/training/test_model_reproducibility.py -v --no-cov
+
+      - name: Mutation-resistance tests (prove our tests are strong)
+        run: |
+          uv run pytest tests/mutation/test_mutation_resistant.py -v --no-cov
+
+      - name: Full offline suite (catch anything else not marked ci_exclude)
+        run: |
+          uv run pytest -m "not ci_exclude" \
+            --ignore=tests/smoke \
+            --ignore=tests/ServingEndpoint \
+            --ignore=tests/fuzz \
+            --ignore=tests/performance \
+            --ignore=tests/contract \
+            --ignore=tests/regression \
+            --ignore=tests/snapshot \
+            --ignore=tests/shadow \
+            --ignore=tests/canary \
+            --ignore=tests/ab \
+            --ignore=tests/monitoring_and_drift \
+            --ignore=tests/property_based \
+            --no-cov
