@@ -87,25 +87,35 @@ jobs:
         run: |
           uv sync --extra test
 
+      # NOTE: No DATABRICKS_TOKEN secret needed. We mint a short-lived bearer
+      # token from the SAME service-principal credentials the deploy already
+      # uses (DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET). Nothing to add
+      # in GitHub settings.
       - name: Set endpoint environment variables (ACC)
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
           HOST="${DATABRICKS_HOST%/}"
 
-          if [ -z "${DATABRICKS_TOKEN:-}" ]; then
-            echo "DATABRICKS_TOKEN secret is empty. Add it to the 'acc' environment"
-            echo "(Settings > Environments > acc > Add secret)."
+          TOKEN=$(curl -sS --request POST \
+            "${HOST}/oidc/v1/token" \
+            --user "${DATABRICKS_CLIENT_ID}:${DATABRICKS_CLIENT_SECRET}" \
+            --data 'grant_type=client_credentials&scope=all-apis' \
+            | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "None" ]; then
+            echo "Failed to mint a token from the service principal."
+            echo "Confirm the SP can issue tokens (workspace OAuth enabled)."
             exit 1
           fi
 
-          # Mask the token so it never appears in logs, then export for later steps.
-          echo "::add-mask::$DATABRICKS_TOKEN"
+          echo "::add-mask::$TOKEN"
           echo "ENDPOINT_URL=${HOST}/serving-endpoints/marvel-character-model-serving/invocations" >> $GITHUB_ENV
-          echo "DBR_TOKEN=$DATABRICKS_TOKEN" >> $GITHUB_ENV
-          echo "DBR_TOKEN set from secret (length: ${#DATABRICKS_TOKEN})."
+          echo "DBR_TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo "DBR_TOKEN minted from service principal (length: ${#TOKEN})."
 
       - name: Smoke tests (GATE - is the live model even alive?)
         run: |
@@ -220,21 +230,27 @@ jobs:
       - name: Set endpoint environment variables (PRD)
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
           HOST="${DATABRICKS_HOST%/}"
 
-          if [ -z "${DATABRICKS_TOKEN:-}" ]; then
-            echo "DATABRICKS_TOKEN secret is empty. Add it to the 'prd' environment"
-            echo "(Settings > Environments > prd > Add secret)."
+          TOKEN=$(curl -sS --request POST \
+            "${HOST}/oidc/v1/token" \
+            --user "${DATABRICKS_CLIENT_ID}:${DATABRICKS_CLIENT_SECRET}" \
+            --data 'grant_type=client_credentials&scope=all-apis' \
+            | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "None" ]; then
+            echo "Failed to mint a token from the service principal (PRD)."
             exit 1
           fi
 
-          echo "::add-mask::$DATABRICKS_TOKEN"
+          echo "::add-mask::$TOKEN"
           echo "ENDPOINT_URL=${HOST}/serving-endpoints/marvel-character-model-serving/invocations" >> $GITHUB_ENV
-          echo "DBR_TOKEN=$DATABRICKS_TOKEN" >> $GITHUB_ENV
-          echo "DBR_TOKEN set from secret (length: ${#DATABRICKS_TOKEN})."
+          echo "DBR_TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo "DBR_TOKEN minted from service principal (length: ${#TOKEN})."
 
       - name: Smoke tests against PROD (GATE)
         run: |
